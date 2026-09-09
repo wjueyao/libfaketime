@@ -4,6 +4,10 @@ Based on upstream v0.9.13 (`86b37fde2fed7336ea2d0c17928e3015a55d9b4a`).
 The fork adds one opt-in policy to the existing timestamp SAVE path; LOAD and
 the timestamp file format are unchanged.
 
+`recording` is the maintained branch. Upstream changes are merged here and
+tested before consumers update their pinned commit. Builds must not follow
+the moving branch tip automatically.
+
 Set `FAKETIME_SAVE_FILE` as usual, with `FAKETIME_SAVE_FAIL_OPEN=1` and
 `FAKETIME_SAVE_MAX_BYTES` (16 through 67108864 bytes). The caller chooses the
 budget; the library has no application-specific default. Without the opt-in,
