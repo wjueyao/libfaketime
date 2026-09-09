@@ -1472,8 +1472,28 @@ static bool write_all(int fd, const void *buffer, size_t count)
   return true;
 }
 
+/* Controlled recorder policy: fail the recording, never the business clock.
+ * The shared error latch also stops descendants from continuing a partial file.
+ * This does not isolate loader faults or arbitrary filesystem stalls. */
+static bool save_fail_open = false;
+static uint64_t save_max_bytes = 0;
+
+static void save_error(const char *message, bool fatal)
+{
+  __atomic_store_n(&ft_shared->save_errors, 1, __ATOMIC_RELAXED);
+  if (!save_fail_open)
+  {
+    perror(message);
+    if (fatal) exit(EXIT_FAILURE);
+  }
+}
+
 static void save_time(struct timespec *tp)
 {
+  int caller_errno = errno;
+  if (save_fail_open && ft_shared != NULL &&
+      __atomic_load_n(&ft_shared->save_errors, __ATOMIC_RELAXED) != 0)
+    return;
   if (shared_sem_initialized && (outfile != -1))
   {
     struct saved_timestamp time_write;
@@ -1491,23 +1511,33 @@ static void save_time(struct timespec *tp)
       }
       else if (errno != EINTR)
       {
-        perror("libfaketime: In save_time(), ft_sem_lock failed");
-        exit(1);
+        save_error("libfaketime: In save_time(), ft_sem_lock failed", true);
+        goto done;
       }
     }
 
-    if (!write_all(outfile, &time_write, sizeof(time_write)))
+    bool may_write = true;
+    if (save_fail_open)
     {
-      perror("libfaketime: In save_time(), saving timestamp to file failed");
+      struct stat sb;
+      may_write = __atomic_load_n(&ft_shared->save_errors, __ATOMIC_RELAXED) == 0 &&
+        ft_real_fstat(outfile, &sb) == 0 && S_ISREG(sb.st_mode) &&
+        sb.st_size >= 0 && (uint64_t)sb.st_size <= save_max_bytes &&
+        save_max_bytes - (uint64_t)sb.st_size >= sizeof(time_write);
+    }
+    if (!may_write || !write_all(outfile, &time_write, sizeof(time_write)))
+    {
+      save_error("libfaketime: In save_time(), saving timestamp to file failed", false);
     }
 
     /* unlock */
     if (ft_sem_unlock(&shared_sem) == -1)
     {
-      perror("libfaketime: In save_time(), ft_sem_unlock failed");
-      exit(1);
+      save_error("libfaketime: In save_time(), ft_sem_unlock failed", true);
     }
   }
+done:
+  if (save_fail_open) errno = caller_errno;
 }
 
 /*
@@ -4110,11 +4140,26 @@ static void ftpl_really_init(void)
 
   if ((tmp_env = getenv("FAKETIME_SAVE_FILE")) != NULL)
   {
+    const char *policy = getenv("FAKETIME_SAVE_FAIL_OPEN");
+    save_fail_open = policy != NULL && strcmp(policy, "1") == 0;
+    if (save_fail_open)
+    {
+      const char *limit = getenv("FAKETIME_SAVE_MAX_BYTES");
+      char *end = NULL;
+      errno = 0;
+      unsigned long long parsed = limit == NULL ? 0 : strtoull(limit, &end, 10);
+      if (limit == NULL || end == limit || *end != '\0' || errno != 0 ||
+          parsed < 16 || parsed > 67108864ULL)
+      {
+        save_error("libfaketime: invalid FAKETIME_SAVE_MAX_BYTES", false);
+        save_max_bytes = 0;
+      }
+      else save_max_bytes = parsed;
+    }
     if (-1 == (outfile = open(tmp_env, O_RDWR | O_APPEND | O_CLOEXEC | O_CREAT,
                               S_IWUSR | S_IRUSR)))
     {
-      perror("libfaketime: In ftpl_init(), opening file for saving timestamps failed");
-      exit(EXIT_FAILURE);
+      save_error("libfaketime: In ftpl_init(), opening file for saving timestamps failed", true);
     }
   }
 

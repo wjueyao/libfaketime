@@ -52,9 +52,11 @@ int main()
   check_offset("start_time_mon_raw", offsetof(struct ft_shared_s, start_time_mon_raw), 56);
 #ifdef CLOCK_BOOTTIME
   check_offset("start_time_boot", offsetof(struct ft_shared_s, start_time_boot), 72);
-  check_size("ft_shared_s", sizeof(struct ft_shared_s), 88);
+  check_offset("save_errors", offsetof(struct ft_shared_s, save_errors), 88);
+  check_size("ft_shared_s", sizeof(struct ft_shared_s), 96);
 #else
-  check_size("ft_shared_s", sizeof(struct ft_shared_s), 72);
+  check_offset("save_errors", offsetof(struct ft_shared_s, save_errors), 72);
+  check_size("ft_shared_s", sizeof(struct ft_shared_s), 80);
 #endif
 
   struct ft_shared_s shared = {0};
