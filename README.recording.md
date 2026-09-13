@@ -1,8 +1,8 @@
 # Optional fail-open timestamp recording
 
 Based on upstream v0.9.13 (`86b37fde2fed7336ea2d0c17928e3015a55d9b4a`).
-The fork adds one opt-in policy to the existing timestamp SAVE path; LOAD and
-the timestamp file format are unchanged.
+The fork adds opt-in fail-open SAVE and program registration. The timestamp
+record format is unchanged.
 
 `recording` is the maintained branch. Upstream changes are merged here and
 tested before consumers update their pinned commit. Builds must not follow
@@ -24,6 +24,20 @@ wrapper and library together; do not mix this layout with upstream v0.9.13's
 layout version 1. No separate manifest or ELF compatibility marker is added.
 
 ## Scope and tests
+
+On controlled Linux, setting all of `FAKETIME_PROGRAM_HELPER`,
+`FAKETIME_PROGRAM_CONFIG`, and `FAKETIME_PROGRAM_SESSION` opts into program
+registration. The trusted static helper is invoked once per library
+initialization as `__faketime env-init CONFIG PID SESSION`; it supplies NUL
+delimited environment assignments for the program's SAVE/LOAD stream. No
+shell evaluation is performed. Missing, failing, or timed-out registration
+keeps real time and writes an `unavailable` diagnostic next to the config.
+The helper deadline is two seconds. Without these variables the registration
+path is inactive. This does not identify logical work across reordered threads
+or fork-without-exec; the caller must keep those execution conditions stable.
+
+Internal clock reads honor `FAKETIME_DONT_FAKE_MONOTONIC` before SAVE/LOAD,
+including wait helpers which bypass the public clock wrapper.
 
 This is not isolation from arbitrary library faults. Dynamic loader errors,
 shared-memory/lock initialization failures, blocking filesystem operations,

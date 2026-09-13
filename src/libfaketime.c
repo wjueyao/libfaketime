@@ -1268,6 +1268,8 @@ retry_shared_objects:
   }
 }
 
+#include "program_init.h"
+
 static void ft_cleanup (void)
 {
   /* detach from shared memory */
@@ -3949,6 +3951,8 @@ static void ftpl_really_init(void)
 #undef dlsym
 #undef dlvsym
 
+  program_bind();
+
 #ifdef FAKE_STATELESS
   if (0) ft_shm_init();
 #else
@@ -4521,6 +4525,15 @@ int fake_clock_gettime(clockid_t clk_id, struct timespec *tp)
   tp_save.tv_nsec = tp->tv_nsec;
 
   if (dont_fake) return 0;
+  /* Internal wait helpers also need the monotonic opt-out before SAVE/LOAD. */
+  if (!fake_monotonic_clock && (clk_id == CLOCK_MONOTONIC || clk_id == CLOCK_MONOTONIC_RAW
+#ifdef CLOCK_MONOTONIC_COARSE
+      || clk_id == CLOCK_MONOTONIC_COARSE
+#endif
+#ifdef CLOCK_BOOTTIME
+      || clk_id == CLOCK_BOOTTIME
+#endif
+      )) return 0;
   /* Per process timers are only sped up or slowed down */
   if ((clk_id == CLOCK_PROCESS_CPUTIME_ID ) || (clk_id == CLOCK_THREAD_CPUTIME_ID))
   {
