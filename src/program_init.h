@@ -6,7 +6,8 @@
 
 static long long program_millis(void) {
   struct timespec t;
-  if (!real_clock_gettime || real_clock_gettime(CLOCK_MONOTONIC,&t)) return -1;
+  int (*clock_now)(clockid_t,struct timespec *)=dlsym(RTLD_NEXT,"clock_gettime");
+  if (!clock_now || clock_now(CLOCK_MONOTONIC,&t)) return -1;
   return (long long)t.tv_sec*1000+t.tv_nsec/1000000;
 }
 static void program_unavailable(const char *config) {
@@ -26,16 +27,35 @@ static void program_bind(void) {
   unsetenv("FAKETIME_SAVE_FILE");unsetenv("FAKETIME_LOAD_FILE");unsetenv("FAKETIME_SHARED");
   setenv("FAKETIME","+0",1);
   char pid[32];snprintf(pid,sizeof(pid),"%ld",(long)getpid());
-  int pipes[2];if(pipe2(pipes,O_CLOEXEC)){program_unavailable(config);return;}
+  int pipes[2];
+  if(pipe(pipes)){program_unavailable(config);return;}
+  if(fcntl(pipes[0],F_SETFD,FD_CLOEXEC)==-1 ||
+     fcntl(pipes[1],F_SETFD,FD_CLOEXEC)==-1){
+    int saved_errno=errno;
+    close(pipes[0]);close(pipes[1]);
+    errno=saved_errno;program_unavailable(config);return;
+  }
   long long start=program_millis();
   if(start<0){close(pipes[0]);close(pipes[1]);program_unavailable(config);return;}
+  /* The registration helper is control-plane code, not a recorded program.
+   * Prepare its environment before fork; do not re-inject this library. */
+  extern char **environ;
+  size_t env_count=0,helper_count=0;
+  while(environ[env_count])env_count++;
+  char **helper_env=malloc((env_count+1)*sizeof(*helper_env));
+  if(!helper_env){close(pipes[0]);close(pipes[1]);program_unavailable(config);return;}
+  for(size_t i=0;i<env_count;i++)
+    if(strncmp(environ[i],"LD_PRELOAD=",11) && strncmp(environ[i],"DYLD_INSERT_LIBRARIES=",22))
+      helper_env[helper_count++]=environ[i];
+  helper_env[helper_count]=NULL;
   pid_t child=fork();
   if(child==0){
     close(pipes[0]);dup2(pipes[1],STDOUT_FILENO);close(pipes[1]);
     int nullfd=open("/dev/null",O_WRONLY);if(nullfd>=0){dup2(nullfd,STDERR_FILENO);close(nullfd);}
     char *const args[]={(char *)helper,"__faketime","env-init",(char *)config,pid,(char *)session,NULL};
-    execv(helper,args);_exit(127);
+    execve(helper,args,helper_env);_exit(127);
   }
+  free(helper_env);
   close(pipes[1]);
   if(child<0){close(pipes[0]);program_unavailable(config);return;}
   char output[16384];size_t used=0;int ok=0,status;
@@ -67,7 +87,7 @@ static void program_bind(void) {
   for(size_t at=0;at<used;){
     char *line=output+at;size_t len=strlen(line);char *eq=strchr(line,'=');
     if(!eq){program_unavailable(config);return;}*eq=0;
-    if(strcmp(line,"LD_PRELOAD") && strcmp(line,"TZ") && strcmp(line,"NO_FAKE_STAT") &&
+    if(strcmp(line,"LD_PRELOAD") && strcmp(line,"DYLD_INSERT_LIBRARIES") && strcmp(line,"TZ") && strcmp(line,"NO_FAKE_STAT") &&
        strcmp(line,"FAKETIME") && strncmp(line,"FAKETIME_",9)) {program_unavailable(config);return;}
     if(setenv(line,eq+1,1)){program_unavailable(config);return;}at+=len+1;
   }
