@@ -1215,7 +1215,10 @@ retry_shared_objects:
 
     /* An inherited pair must already exist; never attach by creating a
        same-named object after validation has failed. */
-    if (-1 == (ticks_shm_fd = shm_open(shm_name, O_RDWR, S_IWUSR|S_IRUSR)))
+    const char *shared_file = getenv("FAKETIME_SHARED_FILE");
+    if (-1 == (ticks_shm_fd = shared_file
+        ? open(shared_file, O_RDWR|O_CLOEXEC|O_NOFOLLOW)
+        : shm_open(shm_name, O_RDWR, S_IWUSR|S_IRUSR)))
     {
       perror("libfaketime: In ft_shm_init(), shm_open failed");
       ft_shm_cleanup_attached(-1);
@@ -1312,6 +1315,11 @@ static void ft_cleanup (void)
   {
     ft_shm_destroy();
     shmCreator = false;
+  }
+  if (program_active_fd >= 0)
+  {
+    close(program_active_fd);
+    program_active_fd = -1;
   }
 }
 
