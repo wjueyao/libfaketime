@@ -51,4 +51,4 @@ for mode in truncated missing; do
   test "$status" = 125
   test ! -s "$work/output"
 done
-echo 'replay binding: PASS' 
+echo 'replay binding: PASS'
