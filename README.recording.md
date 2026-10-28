@@ -62,3 +62,29 @@ and preservation of the default non-opt-in behavior.
 The timestamp record is unchanged (two big-endian 64-bit integers). The shared
 flag is a boolean latch, not an error counter or event log. There is no retry,
 recovery worker, file rotation, or new application configuration format.
+
+## Replay registration binding
+
+`FAKETIME_PROGRAM_BINDING_V1` optionally names a framework-owned regular file
+containing exactly four nonempty NUL-terminated fields: absolute helper path,
+absolute config path, native session ID, absolute activity-lease path (less than
+16384 bytes total). The existing activity protocol is enabled and cannot be
+disabled through a legacy `FAKETIME_PROGRAM_ACTIVE` override. The file
+must remain readable for the attempt lifetime. This binding takes precedence
+over legacy `FAKETIME_PROGRAM_HELPER/CONFIG/SESSION`, including empty assignments
+and `env -u`. Each exec still registers its actual program and receives its own
+LOAD stream and shared state from the helper; a caller's `FAKETIME` assignment
+cannot replace a selected replay stream. Without a binding the existing online
+fail-open policy is unchanged. A missing/malformed binding or registration
+failure with a binding marks `unavailable` and exits 125 before business code.
+
+This is accidental-override protection, not isolation against a program that
+removes the binding or preload, edits framework files, closes descriptors or
+uses uninstrumented clock syscalls. Timestamp format, matching in the helper,
+clock interception and sequence-exhaustion behavior are unchanged. Consumers
+must check support before enabling the protocol; old libraries ignore the new
+variable. This does not grant binary-hash compatibility to old recordings.
+
+Linux regression: `sh test/replay_binding.sh` checks the actual historical
+LOAD timestamp after empty/unset/wrong legacy controls and verifies that a
+broken helper cannot execute business code with real time.

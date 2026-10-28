@@ -10,6 +10,7 @@
 #endif
 
 static int program_active_fd = -1;
+static int program_replay_binding = 0;
 
 static long long program_millis(void) {
   struct timespec t;
@@ -19,16 +20,57 @@ static long long program_millis(void) {
 }
 static void program_unavailable(const char *config) {
   char path[4096];const char *slash=strrchr(config,'/');
-  if(!slash || slash-config+13 >= (int)sizeof(path))return;
+  if(!slash || slash-config+13 >= (int)sizeof(path)){if(program_replay_binding)_exit(125);return;}
   size_t n=(size_t)(slash-config+1);memcpy(path,config,n);
   memcpy(path+n,"unavailable",12);
   int fd=open(path,O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC|O_NONBLOCK|O_NOFOLLOW,0600);
   if(fd>=0){const char message[]="program registration failed\n";(void)write(fd,message,sizeof(message)-1);close(fd);}
+  if(program_replay_binding)_exit(125);
 }
 static void program_bind(void) {
   const char *helper=getenv("FAKETIME_PROGRAM_HELPER");
   const char *config=getenv("FAKETIME_PROGRAM_CONFIG");
   const char *session=getenv("FAKETIME_PROGRAM_SESSION");
+  /* Replay owns registration independently of legacy business overrides.
+   * The framework writes four NUL-terminated fields, not shell code. This
+   * opt-in contract is not a security boundary against removing LD_PRELOAD. */
+  const char *binding=getenv("FAKETIME_PROGRAM_BINDING_V1");
+  char binding_data[16384];
+  if(binding){
+    program_replay_binding=1;
+    int fd=open(binding,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);
+    struct stat st;size_t used=0;
+    if(fd<0) {program_unavailable(binding);return;}
+    if(ft_real_fstat(fd,&st) || !S_ISREG(st.st_mode) || st.st_size<=0 ||
+       st.st_size>=(off_t)sizeof(binding_data)){
+      close(fd);program_unavailable(binding);return;
+    }
+    while(used<(size_t)st.st_size){
+      ssize_t n=read(fd,binding_data+used,(size_t)st.st_size-used);
+      if(n<0 && errno==EINTR)continue;
+      if(n<=0){close(fd);program_unavailable(binding);return;}
+      used+=(size_t)n;
+    }
+    close(fd);
+    const char *fields[4];size_t at=0;
+    for(size_t i=0;i<4;i++){
+      if(at>=used){program_unavailable(binding);return;}
+      char *end=memchr(binding_data+at,0,used-at);
+      if(!end || end==binding_data+at){program_unavailable(binding);return;}
+      fields[i]=binding_data+at;at=(size_t)(end-binding_data)+1;
+    }
+    if(at!=used || fields[0][0]!='/' || fields[1][0]!='/' || fields[3][0]!='/'){
+      program_unavailable(binding);return;
+    }
+    helper=fields[0];config=fields[1];session=fields[2];
+    /* Restore the observable registration identity for descendants and audit. */
+    if(setenv("FAKETIME_PROGRAM_HELPER",helper,1) ||
+       setenv("FAKETIME_PROGRAM_CONFIG",config,1) ||
+       setenv("FAKETIME_PROGRAM_SESSION",session,1) ||
+       setenv("FAKETIME_PROGRAM_ACTIVE",fields[3],1)){
+      program_unavailable(config);return;
+    }
+  }
   if(!helper || !config || !session)return;
   /* An exec is a new program, even when the kernel reuses the parent PID. */
   unsetenv("FAKETIME_SAVE_FILE");unsetenv("FAKETIME_LOAD_FILE");unsetenv("FAKETIME_SHARED");unsetenv("FAKETIME_SHARED_FILE");
@@ -62,6 +104,7 @@ static void program_bind(void) {
   char pid[32];snprintf(pid,sizeof(pid),"%ld",(long)getpid());
   char *legacy_args[]={(char *)helper,"__faketime","env-init","--",(char *)config,pid,(char *)session,NULL};
   char **helper_args=legacy_args;
+  char **allocated_args=NULL;
 #ifdef __APPLE__
   char executable[4096],cwd[4096];
   if(active){
@@ -72,6 +115,7 @@ static void program_bind(void) {
     for(int i=0;i<argc;i++)bytes+=strlen(argv[i])+1;
     if(bytes>128*1024){program_unavailable(config);return;}
     helper_args=calloc((size_t)argc+10,sizeof(char *));
+    allocated_args=helper_args;
     if(!helper_args){program_unavailable(config);return;}
     char *prefix[]={(char *)helper,"__faketime","env-init-v2","--",(char *)config,pid,(char *)session,executable,cwd};
     memcpy(helper_args,prefix,sizeof(prefix));
@@ -80,22 +124,22 @@ static void program_bind(void) {
 #endif
 
   int pipes[2];
-  if(pipe(pipes)){if(helper_args!=legacy_args)free(helper_args);program_unavailable(config);return;}
+  if(pipe(pipes)){free(allocated_args);program_unavailable(config);return;}
   if(fcntl(pipes[0],F_SETFD,FD_CLOEXEC)==-1 ||
      fcntl(pipes[1],F_SETFD,FD_CLOEXEC)==-1){
     int saved_errno=errno;
     close(pipes[0]);close(pipes[1]);
-    errno=saved_errno;if(helper_args!=legacy_args)free(helper_args);program_unavailable(config);return;
+    errno=saved_errno;free(allocated_args);program_unavailable(config);return;
   }
   long long start=program_millis();
-  if(start<0){close(pipes[0]);close(pipes[1]);if(helper_args!=legacy_args)free(helper_args);program_unavailable(config);return;}
+  if(start<0){close(pipes[0]);close(pipes[1]);free(allocated_args);program_unavailable(config);return;}
   /* The registration helper is control-plane code, not a recorded program.
    * Prepare its environment before fork; do not re-inject this library. */
   extern char **environ;
   size_t env_count=0,helper_count=0;
   while(environ[env_count])env_count++;
   char **helper_env=malloc((env_count+1)*sizeof(*helper_env));
-  if(!helper_env){close(pipes[0]);close(pipes[1]);if(helper_args!=legacy_args)free(helper_args);program_unavailable(config);return;}
+  if(!helper_env){close(pipes[0]);close(pipes[1]);free(allocated_args);program_unavailable(config);return;}
   for(size_t i=0;i<env_count;i++)
     if(strncmp(environ[i],"LD_PRELOAD=",11) && strncmp(environ[i],"DYLD_INSERT_LIBRARIES=",22))
       helper_env[helper_count++]=environ[i];
@@ -107,7 +151,7 @@ static void program_bind(void) {
     execve(helper,helper_args,helper_env);_exit(127);
   }
   free(helper_env);
-  if(helper_args!=legacy_args)free(helper_args);
+  free(allocated_args);
   close(pipes[1]);
   if(child<0){close(pipes[0]);program_unavailable(config);return;}
   char output[16384];size_t used=0;int ok=0,status;
