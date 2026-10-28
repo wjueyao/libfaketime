@@ -101,6 +101,15 @@ run_baseline() {
         debian:*|ubuntu:*|gcc:*)
             docker run --rm $docker_platform_arg -e "CFLAGS=${CFLAGS:-}" -e "FAKETIME_COMPILE_CFLAGS=${FAKETIME_COMPILE_CFLAGS:-}" -e "LIBFAKETIME_RUN_OPTIONAL_RUNTIME_TESTS=${LIBFAKETIME_RUN_OPTIONAL_RUNTIME_TESTS:-0}" \
                 -v "$REPO_DIR:/src:ro" "$image" sh -eu -c '
+                . /etc/os-release
+                if [ "${VERSION_CODENAME:-}" = bullseye ]; then
+                    # Debian 11 LTS ended; retain legacy ABI coverage via the
+                    # official signed archive, not removed security mirrors.
+                    printf "%s\n" \
+                        "deb [check-valid-until=no] http://archive.debian.org/debian bullseye main" \
+                        "deb [check-valid-until=no] http://archive.debian.org/debian-security bullseye-security main" > /etc/apt/sources.list
+                    rm -f /etc/apt/sources.list.d/debian.sources
+                fi
                 apt-get update
                 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
                     build-essential bash perl coreutils util-linux file
