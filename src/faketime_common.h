@@ -48,7 +48,11 @@ struct ft_shared_time_s
 
 /* Data shared among faketime-spawned processes */
 #define FT_SHARED_MAGIC 0x46544c42U
+#ifdef FAKETIME_RECORDING
 #define FT_SHARED_VERSION 2U
+#else
+#define FT_SHARED_VERSION 1U
+#endif
 
 struct ft_shared_s
 {
@@ -69,8 +73,10 @@ struct ft_shared_s
 #ifdef CLOCK_BOOTTIME
   struct ft_shared_time_s start_time_boot;
 #endif
+#ifdef FAKETIME_RECORDING
   /* Nonzero once timestamp recording fails; shared by all recording processes. */
   uint64_t save_errors;
+#endif
 };
 
 static inline bool ft_shared_time_valid(const struct ft_shared_time_s *time)

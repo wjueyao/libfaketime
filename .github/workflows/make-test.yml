@@ -73,9 +73,16 @@ jobs:
       run: |
         set -o pipefail
         ./test/clean_build.sh 2>&1 | tee make-test.log
-    - name: Replay registration binding regression
+    - name: Optional recording core
       if: ${{ runner.os == 'Linux' && !matrix.sanitizer && matrix.compile_flags == '' }}
-      run: sh test/replay_binding.sh
+      run: |
+        git fetch --depth=1 https://github.com/wolfcw/libfaketime.git 86b37fde2fed7336ea2d0c17928e3015a55d9b4a
+        mkdir -p /tmp/libfaketime-release
+        git archive 86b37fde2fed7336ea2d0c17928e3015a55d9b4a | tar -xf - -C /tmp/libfaketime-release
+        sh test/release_parity.sh /tmp/libfaketime-release
+        make -C src clean
+        make -C src -j2 FAKETIME_COMPILE_CFLAGS=-DFAKETIME_RECORDING all
+        python3 test/save_fail_open_test.py -v
     - name: Upload build test log
       if: ${{ always() }}
       uses: actions/upload-artifact@v4

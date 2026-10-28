@@ -132,14 +132,6 @@ struct timeb {
 
 #define BUFFERLEN   256
 
-#ifdef __has_attribute
-#if __has_attribute (__symver__)
-#define SYMVER(FUNCTION_NAME, EXPORTED_SYMBOL) __attribute__ (( __symver__ (#EXPORTED_SYMBOL)))
-#else
-#define SYMVER(FUNCTION_NAME, EXPORTED_SYMBOL) __asm__(".symver " #FUNCTION_NAME ", " #EXPORTED_SYMBOL);
-#endif
-#endif
-
 static long stat_mtime_nsec(const struct stat *st);
 
 static long parse_long_setting(const char *name, const char *value)
@@ -1215,10 +1207,14 @@ retry_shared_objects:
 
     /* An inherited pair must already exist; never attach by creating a
        same-named object after validation has failed. */
+#ifdef FAKETIME_RECORDING
     const char *shared_file = getenv("FAKETIME_SHARED_FILE");
     if (-1 == (ticks_shm_fd = shared_file
         ? open(shared_file, O_RDWR|O_CLOEXEC|O_NOFOLLOW)
         : shm_open(shm_name, O_RDWR, S_IWUSR|S_IRUSR)))
+#else
+    if (-1 == (ticks_shm_fd = shm_open(shm_name, O_RDWR, S_IWUSR|S_IRUSR)))
+#endif
     {
       perror("libfaketime: In ft_shm_init(), shm_open failed");
       ft_shm_cleanup_attached(-1);
@@ -1271,7 +1267,11 @@ retry_shared_objects:
   }
 }
 
-#include "program_init.h"
+/* Optional consumer-owned initialization. No application protocol in the library.
+ * The header defines FAKETIME_PROGRAM_INIT() and FAKETIME_PROGRAM_CLEANUP(). */
+#ifdef FAKETIME_PROGRAM_INIT_HEADER
+#include FAKETIME_PROGRAM_INIT_HEADER
+#endif
 
 static void ft_cleanup (void)
 {
@@ -1316,11 +1316,9 @@ static void ft_cleanup (void)
     ft_shm_destroy();
     shmCreator = false;
   }
-  if (program_active_fd >= 0)
-  {
-    close(program_active_fd);
-    program_active_fd = -1;
-  }
+#ifdef FAKETIME_PROGRAM_INIT_HEADER
+  FAKETIME_PROGRAM_CLEANUP();
+#endif
 }
 
 
@@ -1490,6 +1488,7 @@ static bool write_all(int fd, const void *buffer, size_t count)
   return true;
 }
 
+#ifdef FAKETIME_RECORDING
 /* Controlled recorder policy: fail the recording, never the business clock.
  * The shared error latch also stops descendants from continuing a partial file.
  * This does not isolate loader faults or arbitrary filesystem stalls. */
@@ -1506,12 +1505,16 @@ static void save_error(const char *message, bool fatal)
   }
 }
 
+#endif
+
 static void save_time(struct timespec *tp)
 {
+#ifdef FAKETIME_RECORDING
   int caller_errno = errno;
   if (save_fail_open && ft_shared != NULL &&
       __atomic_load_n(&ft_shared->save_errors, __ATOMIC_RELAXED) != 0)
     return;
+#endif
   if (shared_sem_initialized && (outfile != -1))
   {
     struct saved_timestamp time_write;
@@ -1529,11 +1532,17 @@ static void save_time(struct timespec *tp)
       }
       else if (errno != EINTR)
       {
+#ifdef FAKETIME_RECORDING
         save_error("libfaketime: In save_time(), ft_sem_lock failed", true);
         goto done;
+#else
+        perror("libfaketime: In save_time(), ft_sem_lock failed");
+        exit(1);
+#endif
       }
     }
 
+#ifdef FAKETIME_RECORDING
     bool may_write = true;
     if (save_fail_open)
     {
@@ -1547,15 +1556,28 @@ static void save_time(struct timespec *tp)
     {
       save_error("libfaketime: In save_time(), saving timestamp to file failed", false);
     }
+#else
+    if (!write_all(outfile, &time_write, sizeof(time_write)))
+    {
+      perror("libfaketime: In save_time(), saving timestamp to file failed");
+    }
+#endif
 
     /* unlock */
     if (ft_sem_unlock(&shared_sem) == -1)
     {
+#ifdef FAKETIME_RECORDING
       save_error("libfaketime: In save_time(), ft_sem_unlock failed", true);
+#else
+      perror("libfaketime: In save_time(), ft_sem_unlock failed");
+      exit(1);
+#endif
     }
   }
+#ifdef FAKETIME_RECORDING
 done:
   if (save_fail_open) errno = caller_errno;
+#endif
 }
 
 /*
@@ -1850,12 +1872,10 @@ int __lxstat (int ver, const char *path, struct stat *buf)
 #endif
 
 #ifdef __GLIBC__
-#if (_TIME_BITS != 64)
 int stat64 (const char *path, struct stat64 *buf)
 {
   STAT64_HANDLER(stat64, buf, path, buf);
 }
-#endif
 #endif
 
 /* Contributed by Philipp Hachtmann in version 0.6 */
@@ -2743,20 +2763,20 @@ static int sem_clockwait_common(sem_t *sem, clockid_t clockid,
 }
 
 #ifdef __GLIBC__
-SYMVER(sem_clockwait_230, sem_clockwait@GLIBC_2.30)
 int sem_clockwait_230(sem_t *sem, clockid_t clockid,
                       const struct timespec *abstime)
 {
   return sem_clockwait_common(sem, clockid, abstime);
 }
 
-SYMVER(sem_clockwait_234, sem_clockwait@@GLIBC_2.34)
 int sem_clockwait_234(sem_t *sem, clockid_t clockid,
                       const struct timespec *abstime)
 {
   return sem_clockwait_common(sem, clockid, abstime);
 }
 
+__asm__(".symver sem_clockwait_230, sem_clockwait@GLIBC_2.30");
+__asm__(".symver sem_clockwait_234, sem_clockwait@@GLIBC_2.34");
 #else
 int sem_clockwait(sem_t *sem, clockid_t clockid,
                   const struct timespec *abstime)
@@ -3094,7 +3114,6 @@ int timer_gettime(timer_t timerid, struct itimerspec *curr_value)
 /*
  * Faked timer_settime() compatible with implementation in GLIBC 2.2
  */
-SYMVER(timer_settime_22, timer_settime@GLIBC_2.2)
 int timer_settime_22(int timerid, int flags,
          const struct itimerspec *new_value,
          struct itimerspec *old_value)
@@ -3117,7 +3136,6 @@ int timer_settime_22(int timerid, int flags,
 /*
  * Faked timer_settime() compatible with implementation in GLIBC 2.3.3
  */
-SYMVER(timer_settime_233, timer_settime@@GLIBC_2.3.3)
 int timer_settime_233(timer_t timerid, int flags,
       const struct itimerspec *new_value,
       struct itimerspec *old_value)
@@ -3140,7 +3158,6 @@ int timer_settime_233(timer_t timerid, int flags,
 /*
  * Faked timer_gettime() compatible with implementation in GLIBC 2.2
  */
-SYMVER(timer_gettime_22, timer_gettime@GLIBC_2.2)
 int timer_gettime_22(timer_t timerid, struct itimerspec *curr_value)
 {
   ftpl_init();
@@ -3160,7 +3177,6 @@ int timer_gettime_22(timer_t timerid, struct itimerspec *curr_value)
 /*
  * Faked timer_gettime() compatible with implementation in GLIBC 2.3.3
  */
-SYMVER(timer_gettime_233, timer_gettime@@GLIBC_2.3.3)
 int timer_gettime_233(timer_t timerid, struct itimerspec *curr_value)
 {
   ftpl_init();
@@ -3176,6 +3192,11 @@ int timer_gettime_233(timer_t timerid, struct itimerspec *curr_value)
             FT_COMPAT_GLIBC_2_3_3));
   }
 }
+
+__asm__(".symver timer_gettime_22, timer_gettime@GLIBC_2.2");
+__asm__(".symver timer_gettime_233, timer_gettime@@GLIBC_2.3.3");
+__asm__(".symver timer_settime_22, timer_settime@GLIBC_2.2");
+__asm__(".symver timer_settime_233, timer_settime@@GLIBC_2.3.3");
 #endif /* __ANDROID__ */
 
 #ifdef __linux__
@@ -3424,9 +3445,7 @@ int clock_gettime(clockid_t clk_id, struct timespec *tp)
 
 #ifdef __GLIBC__
 /* This is used by glibc 32-bit architectures only. */
-#if (_TIME_BITS != 64)
-/* glibc's 32-bit time64 ABI references these symbols with GLIBC_2.34. */
-SYMVER(__clock_gettime64, __clock_gettime64@GLIBC_2.34)
+#ifndef FAKETIME_TIME64_BUILD
 int __clock_gettime64(clockid_t clk_id, struct __timespec64 *tp64)
 {
   struct timespec tp;
@@ -3457,8 +3476,6 @@ int __gettimeofday64(struct __timeval64 *tv64, void *tz)
 }
 
 /* This is used by glibc 32-bit architectures only. */
-/* glibc's 32-bit time64 ABI references these symbols with GLIBC_2.34. */
-SYMVER(__time64, __time64@GLIBC_2.34)
 uint64_t __time64(uint64_t *write_out)
 {
   struct timespec tp;
@@ -3478,6 +3495,10 @@ uint64_t __time64(uint64_t *write_out)
   }
   return output;
 }
+
+/* glibc's 32-bit time64 ABI references these symbols with GLIBC_2.34. */
+__asm__(".symver __clock_gettime64, __clock_gettime64@GLIBC_2.34");
+__asm__(".symver __time64, __time64@GLIBC_2.34");
 #endif
 #endif
 
@@ -3959,7 +3980,9 @@ static void ftpl_really_init(void)
 #undef dlsym
 #undef dlvsym
 
-  program_bind();
+#ifdef FAKETIME_PROGRAM_INIT_HEADER
+  FAKETIME_PROGRAM_INIT();
+#endif
 
 #ifdef FAKE_STATELESS
   if (0) ft_shm_init();
@@ -4161,6 +4184,7 @@ static void ftpl_really_init(void)
 
   if ((tmp_env = getenv("FAKETIME_SAVE_FILE")) != NULL)
   {
+#ifdef FAKETIME_RECORDING
     const char *policy = getenv("FAKETIME_SAVE_FAIL_OPEN");
     save_fail_open = policy != NULL && strcmp(policy, "1") == 0;
     if (save_fail_open)
@@ -4169,18 +4193,25 @@ static void ftpl_really_init(void)
       char *end = NULL;
       errno = 0;
       unsigned long long parsed = limit == NULL ? 0 : strtoull(limit, &end, 10);
-      if (limit == NULL || end == limit || *end != '\0' || errno != 0 ||
-          parsed < 16 || parsed > 67108864ULL)
+      if (limit == NULL || *limit < '0' || *limit > '9' ||
+          end == limit || *end != '\0' || errno != 0 ||
+          parsed < sizeof(struct saved_timestamp))
       {
         save_error("libfaketime: invalid FAKETIME_SAVE_MAX_BYTES", false);
         save_max_bytes = 0;
       }
       else save_max_bytes = parsed;
     }
+#endif
     if (-1 == (outfile = open(tmp_env, O_RDWR | O_APPEND | O_CLOEXEC | O_CREAT,
                               S_IWUSR | S_IRUSR)))
     {
+#ifdef FAKETIME_RECORDING
       save_error("libfaketime: In ftpl_init(), opening file for saving timestamps failed", true);
+#else
+      perror("libfaketime: In ftpl_init(), opening file for saving timestamps failed");
+      exit(EXIT_FAILURE);
+#endif
     }
   }
 
@@ -4533,6 +4564,7 @@ int fake_clock_gettime(clockid_t clk_id, struct timespec *tp)
   tp_save.tv_nsec = tp->tv_nsec;
 
   if (dont_fake) return 0;
+#ifdef FAKETIME_RECORDING
   /* Internal wait helpers also need the monotonic opt-out before SAVE/LOAD. */
   if (!fake_monotonic_clock && (clk_id == CLOCK_MONOTONIC || clk_id == CLOCK_MONOTONIC_RAW
 #ifdef CLOCK_MONOTONIC_COARSE
@@ -4542,6 +4574,7 @@ int fake_clock_gettime(clockid_t clk_id, struct timespec *tp)
       || clk_id == CLOCK_BOOTTIME
 #endif
       )) return 0;
+#endif
   /* Per process timers are only sped up or slowed down */
   if ((clk_id == CLOCK_PROCESS_CPUTIME_ID ) || (clk_id == CLOCK_THREAD_CPUTIME_ID))
   {
@@ -5042,13 +5075,6 @@ struct pthread_cond_monotonic {
 
 static struct pthread_cond_monotonic *monotonic_conds = NULL;
 
-#ifndef __ANDROID__
-#if defined __ARM_ARCH || defined FORCE_PTHREAD_NONVER
-SYMVER(pthread_cond_init_232, pthread_cond_init@@)
-#else
-SYMVER(pthread_cond_init_232, pthread_cond_init@@GLIBC_2.3.2)
-#endif
-#endif /* __ANDROID__ */
 int pthread_cond_init_232(pthread_cond_t *restrict cond, const pthread_condattr_t *restrict attr)
 {
   clockid_t clock_id;
@@ -5094,13 +5120,6 @@ int pthread_cond_init_232(pthread_cond_t *restrict cond, const pthread_condattr_
   return result;
 }
 
-#ifndef __ANDROID__
-#if defined __ARM_ARCH || defined FORCE_PTHREAD_NONVER
-SYMVER(pthread_cond_destroy_232, pthread_cond_destroy@@)
-#else
-SYMVER(pthread_cond_destroy_232, pthread_cond_destroy@@GLIBC_2.3.2)
-#endif
-#endif /* __ANDROID__ */
 int pthread_cond_destroy_232(pthread_cond_t *cond)
 {
   struct pthread_cond_monotonic* e;
@@ -5305,21 +5324,11 @@ int pthread_cond_timedwait_common(pthread_cond_t *cond, pthread_mutex_t *mutex, 
   return result;
 }
 
-#ifndef __ANDROID__
-SYMVER(pthread_cond_timedwait_225, pthread_cond_timedwait@GLIBC_2.2.5)
-#endif
 int pthread_cond_timedwait_225(pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *abstime)
 {
   return pthread_cond_timedwait_common(cond, mutex, abstime, FT_COMPAT_GLIBC_2_2_5);
 }
 
-#ifndef __ANDROID__
-#if defined __ARM_ARCH || defined FORCE_PTHREAD_NONVER
-SYMVER(pthread_cond_timedwait_232, pthread_cond_timedwait@@)
-#else
-SYMVER(pthread_cond_timedwait_232, pthread_cond_timedwait@@GLIBC_2.3.2)
-#endif
-#endif /* __ANDROID__ */
 int pthread_cond_timedwait_232(pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *abstime)
 {
   return pthread_cond_timedwait_common(cond, mutex, abstime, FT_COMPAT_GLIBC_2_3_2);
@@ -5330,6 +5339,17 @@ int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, const s
 {
   return pthread_cond_timedwait_common(cond, mutex, abstime, FT_COMPAT_GLIBC_2_3_2);
 }
+#else
+__asm__(".symver pthread_cond_timedwait_225, pthread_cond_timedwait@GLIBC_2.2.5");
+#if defined __ARM_ARCH || defined FORCE_PTHREAD_NONVER
+__asm__(".symver pthread_cond_timedwait_232, pthread_cond_timedwait@@");
+__asm__(".symver pthread_cond_init_232, pthread_cond_init@@");
+__asm__(".symver pthread_cond_destroy_232, pthread_cond_destroy@@");
+#else
+__asm__(".symver pthread_cond_timedwait_232, pthread_cond_timedwait@@GLIBC_2.3.2");
+__asm__(".symver pthread_cond_init_232, pthread_cond_init@@GLIBC_2.3.2");
+__asm__(".symver pthread_cond_destroy_232, pthread_cond_destroy@@GLIBC_2.3.2");
+#endif
 #endif /* __ANDROID__ */
 
 #endif
@@ -5610,34 +5630,18 @@ pid_t getpid(void) {
 
 #ifdef INTERCEPT_SYSCALL
 #ifdef INTERCEPT_FUTEX
-// from linux kernel source
-static inline bool futex_cmd_has_timeout(long cmd)
-{
-  switch (cmd) {
-    case FUTEX_WAIT:
-    case FUTEX_LOCK_PI:
-    case FUTEX_LOCK_PI2:
-    case FUTEX_WAIT_BITSET:
-    case FUTEX_WAIT_REQUEUE_PI:
-      return true;
-  }
-  return false;
-}
-
 static inline long make_futex_syscall(long number, uint32_t* uaddr, int futex_op, uint32_t val, struct timespec* timeout, uint32_t* uaddr2, uint32_t val3) {
-  if (futex_cmd_has_timeout(futex_op & FUTEX_CMD_MASK)) {
-    if (timeout == NULL) {
-      // not timeout related, just call the real syscall
-      return real_syscall(number, uaddr, futex_op, val, timeout, uaddr2, val3);
-    }
-    if (timeout->tv_sec < 0) {
-      // fprintf(stderr, "libfaketime: invalid timeout.tv_sec < 0\n");
-      timeout->tv_sec = 0;
-    }
-    if (timeout->tv_nsec < 0) {
-      // fprintf(stderr, "libfaketime: invalid timeout.tv_nsec < 0\n");
-      timeout->tv_nsec = 0;
-    }
+  if (timeout == NULL) {
+    // not timeout related, just call the real syscall
+    return real_syscall(number, uaddr, futex_op, val, timeout, uaddr2, val3);
+  }
+  if (timeout->tv_sec < 0) {
+    // fprintf(stderr, "libfaketime: invalid timeout.tv_sec < 0\n");
+    timeout->tv_sec = 0;
+  }
+  if (timeout->tv_nsec < 0) {
+    // fprintf(stderr, "libfaketime: invalid timeout.tv_nsec < 0\n");
+    timeout->tv_nsec = 0;
   }
   return real_syscall(number, uaddr, futex_op, val, timeout, uaddr2, val3);
 }

@@ -124,6 +124,24 @@ class SaveFailOpenTest(unittest.TestCase):
         self.assertEqual(self.errors(), 1)
         self.assertEqual(self.output.stat().st_size, 0)
 
+    def test_budget_policy_is_owned_by_caller(self):
+        # The consumer, not this library, owns its 64 MiB attachment limit.
+        self.env["FAKETIME_SAVE_MAX_BYTES"] = str(128 * 1024 * 1024)
+        self.run_probe()
+        self.assertEqual(self.errors(), 0)
+        self.assertEqual(self.output.stat().st_size, 64)
+
+    def test_negative_and_overflow_budgets_are_invalid(self):
+        for limit in ("-1", "18446744073709551616"):
+            with self.subTest(limit=limit):
+                self.env["FAKETIME_SAVE_MAX_BYTES"] = limit
+                data = bytearray(self.shared.read_bytes())
+                struct.pack_into("<Q", data, 88, 0)
+                self.shared.write_bytes(data)
+                self.run_probe()
+                self.assertEqual(self.errors(), 1)
+                self.assertEqual(self.output.stat().st_size, 0)
+
     def test_default_open_failure_still_exits(self):
         del self.env["FAKETIME_SAVE_FAIL_OPEN"]
         self.env["FAKETIME_SAVE_FILE"] = str(self.output / "missing" / "time.bin")

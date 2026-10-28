@@ -1,90 +1,83 @@
-# Optional fail-open timestamp recording
+# Optional recording core on libfaketime v0.9.13
 
-Based on upstream v0.9.13 (`86b37fde2fed7336ea2d0c17928e3015a55d9b4a`).
-The fork adds opt-in fail-open SAVE and program registration. The timestamp
-record format is unchanged.
+Release baseline: upstream v0.9.13, commit
+`86b37fde2fed7336ea2d0c17928e3015a55d9b4a`.
+`recording` is the maintenance branch; consumers pin a reviewed commit, never
+its moving tip. Post-release upstream changes are intentionally excluded from
+this release-based patch set. Upgrade the release baseline as a separate review.
 
-`recording` is the maintained branch. Upstream changes are merged here and
-tested before consumers update their pinned commit. Builds must not follow
-the moving branch tip automatically.
+## Default build
 
-Set `FAKETIME_SAVE_FILE` as usual, with `FAKETIME_SAVE_FAIL_OPEN=1` and
-`FAKETIME_SAVE_MAX_BYTES` (16 through 67108864 bytes). The caller chooses the
-budget; the library has no application-specific default. Without the opt-in,
-upstream error reporting and exit behavior remain in effect.
+Without extra build flags the library keeps the release's shared layout version
+1 and its clock, SAVE/LOAD and error paths. `test/release_parity.sh` compares the
+preprocessed library translation unit with a separately verified release tree,
+both with plain flags and with the default feature flags. The ordinary upstream
+build/test matrix runs without recording extensions.
 
-In this mode, a SAVE file open/write/lock/unlock error or budget exhaustion
-stops recording and lets the time call return. SAVE preserves the caller's
-`errno`. A shared `save_errors` flag latches to 1 so later processes using the
-same shared state stop writing. Consumers must reject a recording with this
-flag set: a truncated sequence can still contain valid, whole timestamps.
+## Optional native recording mechanisms
 
-This needs one additional shared-memory field and layout version 2. Build the
-wrapper and library together; do not mix this layout with upstream v0.9.13's
-layout version 1. No separate manifest or ELF compatibility marker is added.
+Build both library and wrapper with `FAKETIME_COMPILE_CFLAGS=-DFAKETIME_RECORDING`.
+This explicitly selects shared layout version 2 (one extra `save_errors` latch).
+Never mix binaries or shared state from the two build profiles.
 
-## Scope and tests
+The optional mechanisms are limited to:
 
-On controlled Linux, setting all of `FAKETIME_PROGRAM_HELPER`,
-`FAKETIME_PROGRAM_CONFIG`, and `FAKETIME_PROGRAM_SESSION` opts into program
-registration. The trusted static helper is invoked once per library
-initialization as `__faketime env-init CONFIG PID SESSION`; it supplies NUL
-delimited environment assignments for the program's SAVE/LOAD stream. No
-shell evaluation is performed. Missing, failing, or timed-out registration
-keeps real time and writes an `unavailable` diagnostic next to the config.
-The helper deadline is two seconds. Without these variables the registration
-path is inactive. This does not identify logical work across reordered threads
-or fork-without-exec; the caller must keep those execution conditions stable.
+- `FAKETIME_SAVE_FAIL_OPEN=1`: SAVE open/write/lock/unlock errors latch failure
+  in shared state and preserve business time calls and their errno. All processes
+  using that state stop writing. Consumers must reject the incomplete recording.
+- `FAKETIME_SAVE_MAX_BYTES`: an unsigned decimal byte budget of at least one
+  timestamp. The caller owns its application limit; the library enforces the
+  supplied capacity while holding the existing write lock. No 64 MiB policy is
+  embedded here. No rotation, retry, recovery worker or matching is added.
+- Internal wait-clock calls honor `FAKETIME_DONT_FAKE_MONOTONIC` before SAVE/LOAD.
+- `FAKETIME_SHARED_FILE`: map the controller-created file instead of the named
+  shared-memory object, using the same layout validation and clock lock. This
+  supports consumers on platforms without filesystem access to POSIX shm.
 
-Internal clock reads honor `FAKETIME_DONT_FAKE_MONOTONIC` before SAVE/LOAD,
-including wait helpers which bypass the public clock wrapper.
+These checks must execute inside the native clock path; an external controller
+cannot reliably reconstruct a failed write, preserve caller errno or intercept
+an internal monotonic clock read afterwards. Timestamp bytes remain two
+big-endian 64-bit integers. Binary identity and layout compatibility are still
+consumer responsibilities; this is not compatibility with old recorded hashes.
 
-This is not isolation from arbitrary library faults. Dynamic loader errors,
-shared-memory/lock initialization failures, blocking filesystem operations,
-and process termination remain outside the SAVE policy. Recording still adds
-I/O and synchronization overhead. The validated target is Linux LE64 with the
-default flock backend; other platforms are not claimed by these tests.
+Loader faults, shared-memory/lock initialization failures, arbitrary filesystem
+stalls and process termination are not covered by SAVE fail-open.
 
-Build and run in an isolated Linux environment:
+## Consumer-owned initialization
+
+An optional compile-time `FAKETIME_PROGRAM_INIT_HEADER` names a header defining
+`FAKETIME_PROGRAM_INIT()` and `FAKETIME_PROGRAM_CLEANUP()`. The library calls init
+after resolving real functions and before shared-state/SAVE/LOAD initialization,
+and cleanup after its normal shared-state cleanup. With no header, no consumer
+code is compiled or called. The header shares the translation unit and may use
+`ft_real_fstat`; it is a source-build seam, not a stable binary plugin ABI.
+
+MindPowers owns its header, helper command, binding format, PID/argv collection,
+activity leases, unavailable diagnostics and failure policy in
+`internal/faketime/native/`. They are not maintained in this fork. Identity,
+matching, occurrences, archive limits and result classification remain in its
+Go controller. An image build explicitly supplies a hash-verified header and
+keeps its corresponding source alongside the resulting library. No runtime
+compiler or new preload library is required.
+
+## Validation
 
 ```sh
-make -C src all
-make -C test shm_layout_test
-./test/shm_layout_test
+sh test/release_parity.sh /path/to/verified/v0.9.13
+sh test/clean_build.sh
+make -C src clean
+make -C src -j2 FAKETIME_COMPILE_CFLAGS=-DFAKETIME_RECORDING all
 python3 test/save_fail_open_test.py -v
 ```
 
-The fault-injection helpers are test-only and are never installed. Tests cover
-normal SAVE/LOAD, open and write failures, SAVE lock/unlock failures, capacity
-and malformed limits, cross-process failure latching, business exit status,
-and preservation of the default non-opt-in behavior.
+The fault-injection tests target Linux LE64/flock. They cover SAVE/LOAD, failed
+open/write/lock/unlock, whole-record truncation, cross-process latching, malformed
+and caller-selected budgets, business exit status and legacy non-opt-in behavior.
+Consumer registration/replay tests belong to the consumer repository and must
+run against the exact combined image build. Default CI alone does not validate
+the optional header or a platform-specific consumer configuration.
 
-The timestamp record is unchanged (two big-endian 64-bit integers). The shared
-flag is a boolean latch, not an error counter or event log. There is no retry,
-recovery worker, file rotation, or new application configuration format.
-
-## Replay registration binding
-
-`FAKETIME_PROGRAM_BINDING_V1` optionally names a framework-owned regular file
-containing exactly four nonempty NUL-terminated fields: absolute helper path,
-absolute config path, native session ID, absolute activity-lease path (less than
-16384 bytes total). The existing activity protocol is enabled and cannot be
-disabled through a legacy `FAKETIME_PROGRAM_ACTIVE` override. The file
-must remain readable for the attempt lifetime. This binding takes precedence
-over legacy `FAKETIME_PROGRAM_HELPER/CONFIG/SESSION`, including empty assignments
-and `env -u`. Each exec still registers its actual program and receives its own
-LOAD stream and shared state from the helper; a caller's `FAKETIME` assignment
-cannot replace a selected replay stream. Without a binding the existing online
-fail-open policy is unchanged. A missing/malformed binding or registration
-failure with a binding marks `unavailable` and exits 125 before business code.
-
-This is accidental-override protection, not isolation against a program that
-removes the binding or preload, edits framework files, closes descriptors or
-uses uninstrumented clock syscalls. Timestamp format, matching in the helper,
-clock interception and sequence-exhaustion behavior are unchanged. Consumers
-must check support before enabling the protocol; old libraries ignore the new
-variable. This does not grant binary-hash compatibility to old recordings.
-
-Linux regression: `sh test/replay_binding.sh` checks the actual historical
-LOAD timestamp after empty/unset/wrong legacy controls and verifies that a
-broken helper cannot execute business code with real time.
+The fail-open mechanism and internal monotonic opt-out are candidates for
+upstream submission, not claimed accepted upstream. The file-backed shared state
+and initialization seam remain optional downstream mechanisms until reviewed by
+the community. There is no second copy of upstream clock algorithms here.
