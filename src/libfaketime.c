@@ -1207,14 +1207,7 @@ retry_shared_objects:
 
     /* An inherited pair must already exist; never attach by creating a
        same-named object after validation has failed. */
-#ifdef FAKETIME_RECORDING
-    const char *shared_file = getenv("FAKETIME_SHARED_FILE");
-    if (-1 == (ticks_shm_fd = shared_file
-        ? open(shared_file, O_RDWR|O_CLOEXEC|O_NOFOLLOW)
-        : shm_open(shm_name, O_RDWR, S_IWUSR|S_IRUSR)))
-#else
     if (-1 == (ticks_shm_fd = shm_open(shm_name, O_RDWR, S_IWUSR|S_IRUSR)))
-#endif
     {
       perror("libfaketime: In ft_shm_init(), shm_open failed");
       ft_shm_cleanup_attached(-1);
@@ -1267,10 +1260,8 @@ retry_shared_objects:
   }
 }
 
-/* Optional consumer-owned initialization. No application protocol in the library.
- * The header defines FAKETIME_PROGRAM_INIT() and FAKETIME_PROGRAM_CLEANUP(). */
-#ifdef FAKETIME_PROGRAM_INIT_HEADER
-#include FAKETIME_PROGRAM_INIT_HEADER
+#if defined(FAKETIME_RECORDING) && defined(__linux__)
+#include "program_init.h"
 #endif
 
 static void ft_cleanup (void)
@@ -1316,8 +1307,8 @@ static void ft_cleanup (void)
     ft_shm_destroy();
     shmCreator = false;
   }
-#ifdef FAKETIME_PROGRAM_INIT_HEADER
-  FAKETIME_PROGRAM_CLEANUP();
+#if defined(FAKETIME_RECORDING) && defined(__linux__)
+  program_cleanup();
 #endif
 }
 
@@ -3980,8 +3971,8 @@ static void ftpl_really_init(void)
 #undef dlsym
 #undef dlvsym
 
-#ifdef FAKETIME_PROGRAM_INIT_HEADER
-  FAKETIME_PROGRAM_INIT();
+#if defined(FAKETIME_RECORDING) && defined(__linux__)
+  program_bind();
 #endif
 
 #ifdef FAKE_STATELESS

@@ -83,6 +83,7 @@ jobs:
         make -C src clean
         make -C src -j2 FAKETIME_COMPILE_CFLAGS=-DFAKETIME_RECORDING all
         python3 test/save_fail_open_test.py -v
+        sh test/replay_binding.sh
     - name: Upload build test log
       if: ${{ always() }}
       uses: actions/upload-artifact@v4
