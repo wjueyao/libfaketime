@@ -34,8 +34,13 @@ The optional mechanisms are limited to:
 These checks must execute inside the native clock path; an external controller
 cannot reliably reconstruct a failed write, preserve caller errno or intercept
 an internal monotonic clock read afterwards. Timestamp bytes remain two
-big-endian 64-bit integers. Binary identity and layout compatibility are still
-consumer responsibilities; this is not compatibility with old recorded hashes.
+big-endian 64-bit integers. The persistent timestamp format is independent of the in-memory shared layout
+and producer binary hash. Existing timestamp files remain readable without
+rewriting or re-recording. Consumers must validate sequence bytes and actual
+consumption, and use the correct shared layout for the current runtime.
+`test/legacy_sequence.sh` verifies exact nanoseconds and backwards timestamps;
+`LEGACY_LIBFAKETIME=/path/to/old.so` additionally records with a historical
+binary and compares new-library replay byte for byte.
 
 Loader faults, shared-memory/lock initialization failures, arbitrary filesystem
 stalls and process termination are not covered by SAVE fail-open.
